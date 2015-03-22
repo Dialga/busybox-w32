@@ -610,7 +610,7 @@ static void make_device(char *device_name, char *path, int operation)
 	 * We use strstr("/block/") to forestall future surprises.
 	 */
 	type = S_IFCHR;
-	if (strstr(path, "/block/") || (G.subsystem && strncmp(G.subsystem, "block", 5) == 0))
+	if (strstr(path, "/block/") || (G.subsystem && is_prefixed_with(G.subsystem, "block")))
 		type = S_IFBLK;
 
 #if ENABLE_FEATURE_MDEV_CONF
@@ -972,7 +972,7 @@ wait_for_seqfile(const char *seq)
 			break;
 		}
 		seqbuf[seqlen] = '\0';
-		if (seqbuf[0] == '\n') {
+		if (seqbuf[0] == '\n' || seqbuf[0] == '\0') {
 			/* seed file: write out seq ASAP */
 			xwrite_str(seq_fd, seq);
 			xlseek(seq_fd, 0, SEEK_SET);

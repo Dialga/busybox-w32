@@ -347,6 +347,8 @@ enum {	/* DO NOT CHANGE THESE VALUES!  cp.c, mv.c, install.c depend on them. */
 	FILEUTILS_SET_SECURITY_CONTEXT = 1 << 10,
 #endif
 	FILEUTILS_IGNORE_CHMOD_ERR = 1 << 11,
+	/* -v */
+	FILEUTILS_VERBOSE         = (1 << 12) * ENABLE_FEATURE_VERBOSE,
 };
 #define FILEUTILS_CP_OPTSTR "pdRfilsLH" IF_SELINUX("c")
 extern int remove_file(const char *path, int flags) FAST_FUNC;
@@ -400,9 +402,10 @@ const char *bb_basename(const char *name) FAST_FUNC;
 /* NB: can violate const-ness (similarly to strchr) */
 char *last_char_is(const char *s, int c) FAST_FUNC;
 const char* endofname(const char *name) FAST_FUNC;
+char *is_prefixed_with(const char *string, const char *key) FAST_FUNC;
 
-void ndelay_on(int fd) FAST_FUNC;
-void ndelay_off(int fd) FAST_FUNC;
+int ndelay_on(int fd) FAST_FUNC;
+int ndelay_off(int fd) FAST_FUNC;
 void close_on_exec_on(int fd) FAST_FUNC;
 void xdup2(int, int) FAST_FUNC;
 void xmove_fd(int, int) FAST_FUNC;
@@ -742,6 +745,18 @@ extern void *xmalloc_open_read_close(const char *filename, size_t *maxsz_p) FAST
 /* Never returns NULL */
 extern void *xmalloc_xopen_read_close(const char *filename, size_t *maxsz_p) FAST_FUNC RETURNS_MALLOC;
 
+#if defined(ARG_MAX) && (ARG_MAX >= 60*1024 || !defined(_SC_ARG_MAX))
+/* Use _constant_ maximum if: defined && (big enough || no variable one exists) */
+# define bb_arg_max() ((unsigned)ARG_MAX)
+#elif defined(_SC_ARG_MAX)
+/* Else use variable one (a bit more expensive) */
+unsigned bb_arg_max(void) FAST_FUNC;
+#else
+/* If all else fails */
+# define bb_arg_max() ((unsigned)(32 * 1024))
+#endif
+unsigned bb_clk_tck(void) FAST_FUNC;
+
 #define SEAMLESS_COMPRESSION (0 \
  || ENABLE_FEATURE_SEAMLESS_XZ \
  || ENABLE_FEATURE_SEAMLESS_LZMA \
@@ -754,11 +769,12 @@ extern void *xmalloc_xopen_read_close(const char *filename, size_t *maxsz_p) FAS
 extern int setup_unzip_on_fd(int fd, int fail_if_not_compressed) FAST_FUNC;
 /* Autodetects .gz etc */
 extern int open_zipped(const char *fname, int fail_if_not_compressed) FAST_FUNC;
+extern void *xmalloc_open_zipped_read_close(const char *fname, size_t *maxsz_p) FAST_FUNC RETURNS_MALLOC;
 #else
 # define setup_unzip_on_fd(...) (0)
 # define open_zipped(fname, fail_if_not_compressed)  open((fname), O_RDONLY);
+# define xmalloc_open_zipped_read_close(fname, maxsz_p) xmalloc_open_read_close((fname), (maxsz_p))
 #endif
-extern void *xmalloc_open_zipped_read_close(const char *fname, size_t *maxsz_p) FAST_FUNC RETURNS_MALLOC;
 
 extern ssize_t safe_write(int fd, const void *buf, size_t count) FAST_FUNC;
 // NB: will return short write on error, not -1,
@@ -922,9 +938,11 @@ void die_if_bad_username(const char* name) FAST_FUNC;
 #if ENABLE_FEATURE_UTMP
 void FAST_FUNC write_new_utmp(pid_t pid, int new_type, const char *tty_name, const char *username, const char *hostname);
 void FAST_FUNC update_utmp(pid_t pid, int new_type, const char *tty_name, const char *username, const char *hostname);
+void FAST_FUNC update_utmp_DEAD_PROCESS(pid_t pid);
 #else
 # define write_new_utmp(pid, new_type, tty_name, username, hostname) ((void)0)
 # define update_utmp(pid, new_type, tty_name, username, hostname) ((void)0)
+# define update_utmp_DEAD_PROCESS(pid) ((void)0)
 #endif
 
 
@@ -1109,6 +1127,7 @@ extern void bb_perror_nomsg_and_die(void) NORETURN FAST_FUNC;
 extern void bb_perror_nomsg(void) FAST_FUNC;
 extern void bb_info_msg(const char *s, ...) __attribute__ ((format (printf, 1, 2))) FAST_FUNC;
 extern void bb_verror_msg(const char *s, va_list p, const char *strerr) FAST_FUNC;
+extern void bb_logenv_override(void) FAST_FUNC;
 
 /* We need to export XXX_main from libbusybox
  * only if we build "individual" binaries
@@ -1271,7 +1290,9 @@ char *bb_simplify_path(const char *path) FAST_FUNC;
 /* Returns ptr to NUL */
 char *bb_simplify_abs_path_inplace(char *path) FAST_FUNC;
 
+#ifndef LOGIN_FAIL_DELAY
 #define LOGIN_FAIL_DELAY 3
+#endif
 extern void bb_do_delay(int seconds) FAST_FUNC;
 extern void change_identity(const struct passwd *pw) FAST_FUNC;
 extern void run_shell(const char *shell, int loginshell, const char *command, const char **additional_args) NORETURN FAST_FUNC;
@@ -1321,6 +1342,7 @@ int sd_listen_fds(void);
 #define SETUP_ENV_NO_CHDIR  (1 << 4)
 void setup_environment(const char *shell, int flags, const struct passwd *pw) FAST_FUNC;
 void nuke_str(char *str) FAST_FUNC;
+int check_password(const struct passwd *pw, const char *plaintext) FAST_FUNC;
 int ask_and_check_password_extended(const struct passwd *pw, int timeout, const char *prompt) FAST_FUNC;
 int ask_and_check_password(const struct passwd *pw) FAST_FUNC;
 /* Returns a malloced string */
@@ -1955,6 +1977,141 @@ static ALWAYS_INLINE unsigned char bb_ascii_tolower(unsigned char a)
 /* NB: must not treat EOF as isgraph or isprint */
 #define isgraph_asciionly(a) ((unsigned)((a) - 0x21) <= 0x7e - 0x21)
 #define isprint_asciionly(a) ((unsigned)((a) - 0x20) <= 0x7e - 0x20)
+
+
+/* Simple unit-testing framework */
+
+typedef void (*bbunit_testfunc)(void);
+
+struct bbunit_listelem {
+	struct bbunit_listelem* next;
+	const char* name;
+	bbunit_testfunc testfunc;
+};
+
+void bbunit_registertest(struct bbunit_listelem* test);
+void bbunit_settestfailed(void);
+
+#define BBUNIT_DEFINE_TEST(NAME) \
+	static void bbunit_##NAME##_test(void); \
+	static struct bbunit_listelem bbunit_##NAME##_elem = { \
+		.name = #NAME, \
+		.testfunc = bbunit_##NAME##_test, \
+	}; \
+	static void INIT_FUNC bbunit_##NAME##_register(void) \
+	{ \
+		bbunit_registertest(&bbunit_##NAME##_elem); \
+	} \
+	static void bbunit_##NAME##_test(void)
+
+/*
+ * Both 'goto bbunit_end' and 'break' are here only to get rid
+ * of compiler warnings.
+ */
+#define BBUNIT_ENDTEST \
+	do { \
+		goto bbunit_end; \
+	bbunit_end: \
+		break; \
+	} while (0)
+
+#define BBUNIT_PRINTASSERTFAIL \
+	do { \
+		bb_error_msg( \
+			"[ERROR] Assertion failed in file %s, line %d", \
+			__FILE__, __LINE__); \
+	} while (0)
+
+#define BBUNIT_ASSERTION_FAILED \
+	do { \
+		bbunit_settestfailed(); \
+		goto bbunit_end; \
+	} while (0)
+
+/*
+ * Assertions.
+ * For now we only offer assertions which cause tests to fail
+ * immediately. In the future 'expects' might be added too -
+ * similar to those offered by the gtest framework.
+ */
+#define BBUNIT_ASSERT_EQ(EXPECTED, ACTUAL) \
+	do { \
+		if ((EXPECTED) != (ACTUAL)) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] '%s' isn't equal to '%s'", \
+						#EXPECTED, #ACTUAL); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_NOTEQ(EXPECTED, ACTUAL) \
+	do { \
+		if ((EXPECTED) == (ACTUAL)) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] '%s' is equal to '%s'", \
+						#EXPECTED, #ACTUAL); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_NOTNULL(PTR) \
+	do { \
+		if ((PTR) == NULL) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] '%s' is NULL!", #PTR); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_NULL(PTR) \
+	do { \
+		if ((PTR) != NULL) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] '%s' is not NULL!", #PTR); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_FALSE(STATEMENT) \
+	do { \
+		if ((STATEMENT)) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] Statement '%s' evaluated to true!", \
+								#STATEMENT); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_TRUE(STATEMENT) \
+	do { \
+		if (!(STATEMENT)) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] Statement '%s' evaluated to false!", \
+					#STATEMENT); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_STREQ(STR1, STR2) \
+	do { \
+		if (strcmp(STR1, STR2) != 0) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] Strings '%s' and '%s' " \
+					"are not the same", STR1, STR2); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
+
+#define BBUNIT_ASSERT_STRNOTEQ(STR1, STR2) \
+	do { \
+		if (strcmp(STR1, STR2) == 0) { \
+			BBUNIT_PRINTASSERTFAIL; \
+			bb_error_msg("[ERROR] Strings '%s' and '%s' " \
+					"are the same, but were " \
+					"expected to differ", STR1, STR2); \
+			BBUNIT_ASSERTION_FAILED; \
+		} \
+	} while (0)
 
 
 POP_SAVED_FUNCTION_VISIBILITY

@@ -161,6 +161,13 @@
 //config:	help
 //config:	  Enable support for test builtin in ash.
 //config:
+//config:config ASH_HELP
+//config:	bool "help builtin"
+//config:	default y
+//config:	depends on ASH
+//config:	help
+//config:	  Enable help builtin in ash.
+//config:
 //config:config ASH_CMDCMD
 //config:	bool "'command' command to override shell builtins"
 //config:	default y
@@ -2189,6 +2196,22 @@ lookupvar(const char *name)
 	return NULL;
 }
 
+static void reinit_unicode_for_ash(void)
+{
+	/* Unicode support should be activated even if LANG is set
+	 * _during_ shell execution, not only if it was set when
+	 * shell was started. Therefore, re-check LANG every time:
+	 */
+	if (ENABLE_FEATURE_CHECK_UNICODE_IN_ENV
+	 || ENABLE_UNICODE_USING_LOCALE
+	) {
+		const char *s = lookupvar("LC_ALL");
+		if (!s) s = lookupvar("LC_CTYPE");
+		if (!s) s = lookupvar("LANG");
+		reinit_unicode(s);
+	}
+}
+
 /*
  * Search the environment of a builtin command.
  */
@@ -3818,7 +3841,7 @@ getjob(const char *name, int getctl)
 
 	if (is_number(p)) {
 		num = atoi(p);
-		if (num < njobs) {
+		if (num <= njobs) {
 			jp = jobtab + num - 1;
 			if (jp->used)
 				goto gotit;
@@ -6717,7 +6740,15 @@ subevalvar(char *p, char *varname, int strloc, int subtype,
 				len = number(loc);
 			}
 		}
-		if (pos >= orig_len) {
+		if (pos < 0) {
+			/* ${VAR:$((-n)):l} starts n chars from the end */
+			pos = orig_len + pos;
+		}
+		if ((unsigned)pos >= orig_len) {
+			/* apart from obvious ${VAR:999999:l},
+			 * covers ${VAR:$((-9999999)):l} - result is ""
+			 * (bash-compat)
+			 */
 			pos = 0;
 			len = 0;
 		}
@@ -7044,6 +7075,14 @@ varvalue(char *name, int varflags, int flags, struct strlist *var_str_list)
 		len = strlen(p);
 		if (!(subtype == VSPLUS || subtype == VSLENGTH))
 			memtodest(p, len, syntax, quotes);
+#if ENABLE_UNICODE_SUPPORT
+		if (subtype == VSLENGTH && len > 0) {
+			reinit_unicode_for_ash();
+			if (unicode_status == UNICODE_ON) {
+				len = unicode_strlen(p);
+			}
+		}
+#endif
 		return len;
 	}
 
@@ -9180,8 +9219,8 @@ setinteractive(int on)
 		if (!did_banner) {
 			/* note: ash and hush share this string */
 			out1fmt("\n\n%s %s\n"
-				"Enter 'help' for a list of built-in commands."
-				"\n\n",
+				IF_ASH_HELP("Enter 'help' for a list of built-in commands.\n")
+				"\n",
 				bb_banner,
 				"built-in shell (ash)"
 			);
@@ -9434,7 +9473,7 @@ static int exportcmd(int, char **) FAST_FUNC;
 #if ENABLE_ASH_GETOPTS
 static int getoptscmd(int, char **) FAST_FUNC;
 #endif
-#if !ENABLE_FEATURE_SH_EXTRA_QUIET
+#if ENABLE_ASH_HELP
 static int helpcmd(int, char **) FAST_FUNC;
 #endif
 #if MAX_HISTORY
@@ -9510,7 +9549,7 @@ static const struct builtincmd builtintab[] = {
 	{ BUILTIN_REGULAR       "getopts" , getoptscmd },
 #endif
 	{ BUILTIN_NOSPEC        "hash"    , hashcmd    },
-#if !ENABLE_FEATURE_SH_EXTRA_QUIET
+#if ENABLE_ASH_HELP
 	{ BUILTIN_NOSPEC        "help"    , helpcmd    },
 #endif
 #if MAX_HISTORY
@@ -10080,16 +10119,7 @@ preadfd(void)
 # if ENABLE_FEATURE_TAB_COMPLETION
 		line_input_state->path_lookup = pathval();
 # endif
-		/* Unicode support should be activated even if LANG is set
-		 * _during_ shell execution, not only if it was set when
-		 * shell was started. Therefore, re-check LANG every time:
-		 */
-		{
-			const char *s = lookupvar("LC_ALL");
-			if (!s) s = lookupvar("LC_CTYPE");
-			if (!s) s = lookupvar("LANG");
-			reinit_unicode(s);
-		}
+		reinit_unicode_for_ash();
 		nr = read_line_input(line_input_state, cmdedit_prompt, buf, IBUFSIZ, timeout);
 		if (nr == 0) {
 			/* Ctrl+C pressed */
@@ -10951,7 +10981,7 @@ static union node *andor(void);
 static union node *pipeline(void);
 static union node *parse_command(void);
 static void parseheredoc(void);
-static char peektoken(void);
+static char nexttoken_ends_list(void);
 static int readtoken(void);
 
 static union node *
@@ -10961,7 +10991,7 @@ list(int nlflag)
 	int tok;
 
 	checkkwd = CHKNL | CHKKWD | CHKALIAS;
-	if (nlflag == 2 && peektoken())
+	if (nlflag == 2 && nexttoken_ends_list())
 		return NULL;
 	n1 = NULL;
 	for (;;) {
@@ -11003,8 +11033,15 @@ list(int nlflag)
 				tokpushback = 1;
 			}
 			checkkwd = CHKNL | CHKKWD | CHKALIAS;
-			if (peektoken())
+			if (nexttoken_ends_list()) {
+				/* Testcase: "<<EOF; then <W".
+				 * It used to segfault w/o this check:
+				 */
+				if (heredoclist) {
+					raise_error_unexpected_syntax(-1);
+				}
 				return n1;
+			}
 			break;
 		case TEOF:
 			if (heredoclist)
@@ -12441,7 +12478,7 @@ readtoken(void)
 }
 
 static char
-peektoken(void)
+nexttoken_ends_list(void)
 {
 	int t;
 
@@ -13059,10 +13096,7 @@ trapcmd(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 
 /* ============ Builtins */
 
-#if !ENABLE_FEATURE_SH_EXTRA_QUIET
-/*
- * Lists available builtins
- */
+#if ENABLE_ASH_HELP
 static int FAST_FUNC
 helpcmd(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 {
@@ -13080,7 +13114,7 @@ helpcmd(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 			col = 0;
 		}
 	}
-#if ENABLE_FEATURE_SH_STANDALONE
+# if ENABLE_FEATURE_SH_STANDALONE
 	{
 		const char *a = applet_names;
 		while (*a) {
@@ -13092,11 +13126,11 @@ helpcmd(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 			a += strlen(a) + 1;
 		}
 	}
-#endif
+# endif
 	out1fmt("\n\n");
 	return EXIT_SUCCESS;
 }
-#endif /* FEATURE_SH_EXTRA_QUIET */
+#endif
 
 #if MAX_HISTORY
 static int FAST_FUNC
@@ -13222,7 +13256,7 @@ timescmd(int argc UNUSED_PARAM, char **argv UNUSED_PARAM)
 	const unsigned char *p;
 	struct tms buf;
 
-	clk_tck = sysconf(_SC_CLK_TCK);
+	clk_tck = bb_clk_tck();
 	times(&buf);
 
 	p = timescmd_str;

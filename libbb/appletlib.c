@@ -184,8 +184,7 @@ void lbb_prepare(const char *applet
 #endif
 	applet_name = applet;
 
-	/* Set locale for everybody except 'init' */
-	if (ENABLE_LOCALE_SUPPORT && getpid() != 1)
+	if (ENABLE_LOCALE_SUPPORT)
 		setlocale(LC_ALL, "");
 
 #if ENABLE_PLATFORM_MINGW32
@@ -198,7 +197,7 @@ void lbb_prepare(const char *applet
 	if (argv[1]
 	 && !argv[2]
 	 && strcmp(argv[1], "--help") == 0
-	 && strncmp(applet, "busybox", 7) != 0
+	 && !is_prefixed_with(applet, "busybox")
 	) {
 		/* Special case. POSIX says "test --help"
 		 * should be no different from e.g. "test --foo".  */
@@ -687,7 +686,7 @@ static int busybox_main(char **argv)
 		return 0;
 	}
 
-	if (strncmp(argv[1], "--list", 6) == 0) {
+	if (is_prefixed_with(argv[1], "--list")) {
 		unsigned i = 0;
 		const char *a = applet_names;
 		dup2(1, 2);
@@ -747,7 +746,8 @@ static int busybox_main(char **argv)
 	/*bb_error_msg_and_die("applet not found"); - sucks in printf */
 	full_write2_str(applet_name);
 	full_write2_str(": applet not found\n");
-	xfunc_die();
+	/* POSIX: "If a command is not found, the exit status shall be 127" */
+	exit(127);
 }
 
 void FAST_FUNC run_applet_no_and_exit(int applet_no, char **argv)
@@ -759,15 +759,25 @@ void FAST_FUNC run_applet_no_and_exit(int applet_no, char **argv)
 
 	/* Reinit some shared global data */
 	xfunc_error_retval = EXIT_FAILURE;
-
 	applet_name = APPLET_NAME(applet_no);
-	if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-		/* Special case. POSIX says "test --help"
-		 * should be no different from e.g. "test --foo".  */
-//TODO: just compare applet_no with APPLET_NO_test
-		if (!ENABLE_TEST || strcmp(applet_name, "test") != 0) {
-			/* If you want "foo --help" to return 0: */
-			xfunc_error_retval = 0;
+
+#if defined APPLET_NO_test
+	/* Special case. POSIX says "test --help"
+	 * should be no different from e.g. "test --foo".
+	 * Thus for "test", we skip --help check.
+	 */
+	if (applet_no != APPLET_NO_test)
+#endif
+	{
+		if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+#if defined APPLET_NO_false
+			/* Someone insisted that "false --help" must exit 1. Sigh */
+			if (applet_no != APPLET_NO_false)
+#endif
+			{
+				/* Make "foo --help" exit with 0: */
+				xfunc_error_retval = 0;
+			}
 			bb_show_usage();
 		}
 	}
@@ -781,7 +791,7 @@ void FAST_FUNC run_applet_and_exit(const char *name, char **argv)
 	int applet = find_applet_by_name(name);
 	if (applet >= 0)
 		run_applet_no_and_exit(applet, argv);
-	if (strncmp(name, "busybox", 7) == 0)
+	if (is_prefixed_with(name, "busybox"))
 		exit(busybox_main(argv));
 }
 
@@ -818,9 +828,21 @@ int main(int argc UNUSED_PARAM, char **argv)
 	}
 #endif
 
+#if defined(__MINGW64_VERSION_MAJOR)
+	if ( stdin ) {
+		_setmode(fileno(stdin), _O_BINARY);
+	}
+	if ( stdout ) {
+		_setmode(fileno(stdout), _O_BINARY);
+	}
+	if ( stderr ) {
+		_setmode(fileno(stderr), _O_BINARY);
+	}
+#endif
+
 #if defined(SINGLE_APPLET_MAIN)
 	/* Only one applet is selected in .config */
-	if (argv[1] && strncmp(argv[0], "busybox", 7) == 0) {
+	if (argv[1] && is_prefixed_with(argv[0], "busybox")) {
 		/* "busybox <applet> <params>" should still work as expected */
 		argv++;
 	}
@@ -861,6 +883,7 @@ int main(int argc UNUSED_PARAM, char **argv)
 	/*bb_error_msg_and_die("applet not found"); - sucks in printf */
 	full_write2_str(applet_name);
 	full_write2_str(": applet not found\n");
-	xfunc_die();
+	/* POSIX: "If a command is not found, the exit status shall be 127" */
+	exit(127);
 #endif
 }

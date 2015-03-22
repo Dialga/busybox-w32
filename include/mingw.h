@@ -7,7 +7,14 @@
  */
 typedef int gid_t;
 typedef int uid_t;
+#ifndef _WIN64
 typedef int pid_t;
+#else
+typedef __int64 pid_t;
+#endif
+
+#define DEFAULT_UID 1000
+#define DEFAULT_GID 1000
 
 /*
  * arpa/inet.h
@@ -38,7 +45,7 @@ struct group {
 	char **gr_mem;
 };
 IMPL(getgrnam,struct group *,NULL,const char *name UNUSED_PARAM);
-IMPL(getgrgid,struct group *,NULL,gid_t gid UNUSED_PARAM);
+struct group *getgrgid(gid_t gid);
 NOIMPL(initgroups,const char *group UNUSED_PARAM,gid_t gid UNUSED_PARAM);
 static inline void endgrent(void) {}
 
@@ -67,6 +74,7 @@ struct sockaddr_un {
  */
 struct passwd {
 	char *pw_name;
+	char *pw_passwd;
 	char *pw_gecos;
 	char *pw_dir;
 	char *pw_shell;
@@ -75,10 +83,11 @@ struct passwd {
 };
 
 IMPL(getpwnam,struct passwd *,NULL,const char *name UNUSED_PARAM);
-struct passwd *getpwuid(int uid);
+struct passwd *getpwuid(uid_t uid);
 static inline void setpwent(void) {}
 static inline void endpwent(void) {}
 IMPL(getpwent_r,int,ENOENT,struct passwd *pwbuf UNUSED_PARAM,char *buf UNUSED_PARAM,size_t buflen UNUSED_PARAM,struct passwd **pwbufp UNUSED_PARAM);
+IMPL(getpwent,struct passwd *,NULL,void)
 
 /*
  * signal.h
@@ -122,6 +131,7 @@ NOIMPL(FAST_FUNC sigaction_set,int signo UNUSED_PARAM, const struct sigaction *s
 /*
  * stdio.h
  */
+#undef fseeko
 #define fseeko(f,o,w) fseek(f,o,w)
 
 int fdprintf(int fd, const char *format, ...);
@@ -252,6 +262,7 @@ int mingw_mkdir(const char *path, int mode);
 #if ENABLE_LFS
 # define off_t off64_t
 #endif
+#undef lseek
 #define lseek _lseeki64
 
 typedef int nlink_t;
@@ -277,6 +288,9 @@ struct mingw_stat {
 int mingw_lstat(const char *file_name, struct mingw_stat *buf);
 int mingw_stat(const char *file_name, struct mingw_stat *buf);
 int mingw_fstat(int fd, struct mingw_stat *buf);
+#undef lstat
+#undef stat
+#undef fstat
 #define lstat mingw_lstat
 #define stat mingw_stat
 #define fstat mingw_fstat
@@ -351,20 +365,14 @@ int mingw_dup2 (int fd, int fdto);
 char *mingw_getcwd(char *pointer, int len);
 
 
-#ifdef USE_WIN32_MMAP
-int mingw_getpagesize(void);
-#define getpagesize mingw_getpagesize
-#else
-int getpagesize(void);	/* defined in MinGW's libgcc.a */
-#endif
-
-IMPL(getgid,int,1,void);
+IMPL(getgid,int,DEFAULT_GID,void);
 NOIMPL(getgroups,int n UNUSED_PARAM,gid_t *groups UNUSED_PARAM);
 IMPL(getppid,int,1,void);
-IMPL(getegid,int,1,void);
-IMPL(geteuid,int,1,void);
+IMPL(getegid,int,DEFAULT_GID,void);
+IMPL(geteuid,int,DEFAULT_UID,void);
 NOIMPL(getsid,pid_t pid UNUSED_PARAM);
-IMPL(getuid,int,1,void);
+IMPL(getuid,int,DEFAULT_UID,void);
+int getlogin_r(char *buf, size_t len);
 int fcntl(int fd, int cmd, ...);
 #define fork() -1
 IMPL(fsync,int,0,int fd UNUSED_PARAM);

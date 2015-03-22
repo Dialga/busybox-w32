@@ -6,7 +6,14 @@
 int _CRT_glob = 0;
 #endif
 
+#if !defined(__MINGW64_VERSION_MAJOR)
 unsigned int _CRT_fmode = _O_BINARY;
+#else
+#undef _fmode
+int _fmode = _O_BINARY;
+#endif
+
+smallint bb_got_signal;
 
 static int err_win_to_posix(DWORD winerr)
 {
@@ -182,7 +189,7 @@ static inline int file_attr_to_st_mode (DWORD attr)
 {
 	int fMode = S_IREAD;
 	if (attr & FILE_ATTRIBUTE_DIRECTORY)
-		fMode |= S_IFDIR;
+		fMode |= S_IFDIR|S_IWRITE|S_IEXEC;
 	else
 		fMode |= S_IFREG;
 	if (!(attr & FILE_ATTRIBUTE_READONLY))
@@ -226,8 +233,8 @@ static int do_lstat(int follow, const char *file_name, struct mingw_stat *buf)
 		int len = strlen(file_name);
 
 		buf->st_ino = 0;
-		buf->st_gid = 0;
-		buf->st_uid = 0;
+		buf->st_uid = DEFAULT_UID;
+		buf->st_gid = DEFAULT_GID;
 		buf->st_nlink = 1;
 		buf->st_mode = file_attr_to_st_mode(fdata.dwFileAttributes);
 		if (len > 4 && (!strcasecmp(file_name+len-4, ".exe") ||
@@ -333,8 +340,8 @@ int mingw_fstat(int fd, struct mingw_stat *buf)
 		buf->st_ino = 0;
 		buf->st_mode = S_IREAD|S_IWRITE;
 		buf->st_nlink = 1;
-		buf->st_uid = 0;
-		buf->st_gid = 0;
+		buf->st_uid = DEFAULT_UID;
+		buf->st_gid = DEFAULT_GID;
 		buf->st_rdev = 0;
 		buf->st_size = buf64.st_size;
 		buf->st_atime = buf64.st_atime;
@@ -346,8 +353,8 @@ int mingw_fstat(int fd, struct mingw_stat *buf)
 
 	if (GetFileInformationByHandle(fh, &fdata)) {
 		buf->st_ino = 0;
-		buf->st_gid = 0;
-		buf->st_uid = 0;
+		buf->st_uid = DEFAULT_UID;
+		buf->st_gid = DEFAULT_GID;
 		buf->st_nlink = 1;
 		buf->st_mode = file_attr_to_st_mode(fdata.dwFileAttributes);
 		buf->st_size = fdata.nFileSizeLow |
@@ -561,23 +568,77 @@ static char *gethomedir(void)
 	return buf;
 }
 
-struct passwd *getpwuid(int uid UNUSED_PARAM)
+static char *get_user_name(void)
 {
-	static char user_name[100];
-	static struct passwd p;
+	static char user_name[100] = "";
+	char *s;
 	DWORD len = sizeof(user_name);
 
-	user_name[0] = '\0';
-	if (!GetUserName(user_name, &len))
+	if ( user_name[0] != '\0' ) {
+		return user_name;
+	}
+
+	if ( !GetUserName(user_name, &len) ) {
 		return NULL;
-	p.pw_name = user_name;
+	}
+
+	for ( s=user_name; *s; ++s ) {
+		if ( *s == ' ' ) {
+			*s = '_';
+		}
+	}
+
+	return user_name;
+}
+
+struct passwd *getpwuid(uid_t uid UNUSED_PARAM)
+{
+	static struct passwd p;
+
+	if ( (p.pw_name=get_user_name()) == NULL ) {
+		return NULL;
+	}
+	p.pw_passwd = (char *)"secret";
 	p.pw_gecos = (char *)"unknown";
 	p.pw_dir = gethomedir();
 	p.pw_shell = NULL;
-	p.pw_uid = 1000;
-	p.pw_gid = 1000;
+	p.pw_uid = DEFAULT_UID;
+	p.pw_gid = DEFAULT_GID;
 
 	return &p;
+}
+
+struct group *getgrgid(gid_t gid UNUSED_PARAM)
+{
+	static char *members[2] = { NULL, NULL };
+	static struct group g;
+
+	if ( (g.gr_name=get_user_name()) == NULL ) {
+		return NULL;
+	}
+	g.gr_passwd = (char *)"secret";
+	g.gr_gid = DEFAULT_GID;
+	members[0] = g.gr_name;
+	g.gr_mem = members;
+
+	return &g;
+}
+
+int getlogin_r(char *buf, size_t len)
+{
+	char *name;
+
+	if ( (name=get_user_name()) == NULL ) {
+		return -1;
+	}
+
+	if ( strlen(name) >= len ) {
+		errno = ERANGE;
+		return -1;
+	}
+
+	strcpy(buf, name);
+	return 0;
 }
 
 long sysconf(int name)
@@ -762,7 +823,20 @@ const char *get_busybox_exec_path(void)
 #undef mkdir
 int mingw_mkdir(const char *path, int mode UNUSED_PARAM)
 {
-	return mkdir(path);
+	int ret;
+	struct stat st;
+	int lerrno = 0;
+
+	if ( (ret=mkdir(path)) < 0 ) {
+		lerrno = errno;
+		if ( lerrno == EACCES && stat(path, &st) == 0 ) {
+			ret = 0;
+			lerrno = 0;
+		}
+	}
+
+	errno = lerrno;
+	return ret;
 }
 
 int fcntl(int fd, int cmd, ...)
@@ -798,6 +872,7 @@ int fcntl(int fd, int cmd, ...)
 		}
 		free(fds);
 		result = newfd;
+		break;
 	default:
 		errno = ENOSYS;
 		break;
@@ -821,11 +896,14 @@ size_t mingw_strftime(char *buf, size_t max, const char *format, const struct tm
 	size_t ret;
 	char day[3];
 	char *t;
-	char *fmt;
+	char *fmt, *newfmt;
+	struct tm tm2;
+	int m;
 
 	/*
-	 * Emulate the '%e' format that Windows' strftime lacks.  Happily, the
-	 * string that replaces '%e' is always two characters long.
+	 * Emulate the '%e' and '%s' formats that Windows' strftime lacks.
+	 * Happily, the string that replaces '%e' is two characters long.
+	 * '%s' is a bit more complicated.
 	 */
 	fmt = xstrdup(format);
 	for ( t=fmt; *t; ++t ) {
@@ -838,6 +916,15 @@ size_t mingw_strftime(char *buf, size_t max, const char *format, const struct tm
 					strcpy(day, "  ");
 				}
 				memcpy(t++, day, 2);
+			}
+			else if ( t[1] == 's' ) {
+				*t = '\0';
+				m = t - fmt;
+				tm2 = *tm;
+				newfmt = xasprintf("%s%d%s", fmt, (int)mktime(&tm2), t+2);
+				free(fmt);
+				t = newfmt + m + 1;
+				fmt = newfmt;
 			}
 			else if ( t[1] != '\0' ) {
 				++t;
